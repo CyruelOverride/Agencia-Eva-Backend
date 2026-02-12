@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import bcrypt from 'bcrypt';
-import jwt from 'jsonwebtoken';
+import jwt, { SignOptions } from 'jsonwebtoken';
 import pg from 'pg';
 const { Pool } = pg;
 
@@ -30,8 +30,8 @@ const getPoolConfig = () => {
 
 const pool = new Pool(getPoolConfig());
 
-const JWT_SECRET = process.env.JWT_SECRET || 'tu-secret-key-muy-segura-cambiar-en-produccion';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
+const JWT_SECRET: string = process.env.JWT_SECRET || 'tu-secret-key-muy-segura-cambiar-en-produccion';
+const JWT_EXPIRES_IN: string = process.env.JWT_EXPIRES_IN || '24h';
 
 export interface AdministradorDB {
   id: string;
@@ -94,15 +94,17 @@ export class AuthService {
    * Genera un token JWT
    */
   static generateToken(administrador: { id: string; email: string }): string {
-    return jwt.sign(
-      { 
-        id: administrador.id, 
-        email: administrador.email,
-        type: 'admin'
-      },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
+    const payload = { 
+      id: administrador.id, 
+      email: administrador.email,
+      type: 'admin'
+    };
+    
+    const options: SignOptions = {
+      expiresIn: JWT_EXPIRES_IN
+    };
+    
+    return jwt.sign(payload, JWT_SECRET, options);
   }
 
   /**
