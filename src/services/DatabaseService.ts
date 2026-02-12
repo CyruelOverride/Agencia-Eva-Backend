@@ -6,28 +6,45 @@ const { Pool } = pg;
 // Configuración de la base de datos desde variables de entorno
 // Prioridad: DATABASE_URL > variables individuales
 const getPoolConfig = () => {
-  if (process.env.DATABASE_URL) {
-    // Si existe DATABASE_URL, usarla directamente (tiene prioridad)
-    return {
-      connectionString: process.env.DATABASE_URL,
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-      ssl: process.env.DATABASE_URL.includes('render.com') ? { rejectUnauthorized: false } : undefined,
-    };
-  } else {
-    // Si no, usar variables individuales
-    return {
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5432'),
-      database: process.env.DB_NAME || 'bot_agencia',
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || '',
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-    };
+  const databaseUrl = process.env.DATABASE_URL;
+  
+  // Validar que DATABASE_URL esté presente y sea una URL válida
+  if (databaseUrl && databaseUrl.trim() !== '' && databaseUrl.startsWith('postgres://')) {
+    try {
+      // Validar que sea una URL válida
+      new URL(databaseUrl);
+      
+      return {
+        connectionString: databaseUrl,
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 2000,
+        ssl: databaseUrl.includes('render.com') ? { rejectUnauthorized: false } : undefined,
+      };
+    } catch (error) {
+      console.error('❌ DATABASE_URL tiene formato inválido:', error);
+      // Continuar con variables individuales
+    }
   }
+  
+  // Usar variables individuales como fallback
+  const config: any = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME || 'bot_agencia',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  };
+  
+  // Si estamos en Render y no hay DATABASE_URL, intentar detectar SSL
+  if (process.env.RENDER && !databaseUrl) {
+    config.ssl = { rejectUnauthorized: false };
+  }
+  
+  return config;
 };
 
 const pool = new Pool(getPoolConfig());

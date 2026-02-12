@@ -6,26 +6,45 @@ const { Pool } = pg;
 
 // Configuración de la base de datos
 const getPoolConfig = () => {
-  if (process.env.DATABASE_URL) {
-    return {
-      connectionString: process.env.DATABASE_URL,
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-      ssl: process.env.DATABASE_URL.includes('render.com') ? { rejectUnauthorized: false } : undefined,
-    };
-  } else {
-    return {
-      host: process.env.DB_HOST || 'localhost',
-      port: parseInt(process.env.DB_PORT || '5432'),
-      database: process.env.DB_NAME || 'bot_agencia',
-      user: process.env.DB_USER || 'postgres',
-      password: process.env.DB_PASSWORD || '',
-      max: 20,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 2000,
-    };
+  const databaseUrl = process.env.DATABASE_URL;
+  
+  // Validar que DATABASE_URL esté presente y sea una URL válida
+  if (databaseUrl && databaseUrl.trim() !== '' && databaseUrl.startsWith('postgres://')) {
+    try {
+      // Validar que sea una URL válida
+      new URL(databaseUrl);
+      
+      return {
+        connectionString: databaseUrl,
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 2000,
+        ssl: databaseUrl.includes('render.com') ? { rejectUnauthorized: false } : undefined,
+      };
+    } catch (error) {
+      console.error('❌ DATABASE_URL tiene formato inválido:', error);
+      // Continuar con variables individuales
+    }
   }
+  
+  // Usar variables individuales como fallback
+  const config: any = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432'),
+    database: process.env.DB_NAME || 'bot_agencia',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  };
+  
+  // Si estamos en Render y no hay DATABASE_URL, intentar detectar SSL
+  if (process.env.RENDER && !databaseUrl) {
+    config.ssl = { rejectUnauthorized: false };
+  }
+  
+  return config;
 };
 
 const pool = new Pool(getPoolConfig());
@@ -62,17 +81,95 @@ export interface LoginResponse {
 
 export class AuthService {
   /**
+   * Crea la tabla de administradores si no existe
+   */
+  static async createAdminTableIfNotExists(): Promise<void> {
+    const client = await pool.connect();
+    try {
+      console.log('🔧 Verificando tabla de administradores...');
+      
+      // Crear tabla
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS administradores (
+          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          nombre VARCHAR(100),
+          activo BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_login TIMESTAMP
+        );
+      `);
+
+      // Crear índices
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_administradores_email ON administradores(email);
+        CREATE INDEX IF NOT EXISTS idx_administradores_activo ON administradores(activo);
+      `);
+
+      // Verificar si existe la función de trigger
+      await client.query(`
+        CREATE OR REPLACE FUNCTION actualizar_updated_at()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = CURRENT_TIMESTAMP;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+      `);
+
+      // Crear trigger
+      await client.query(`
+        DROP TRIGGER IF EXISTS trigger_actualizar_updated_at_administradores ON administradores;
+        CREATE TRIGGER trigger_actualizar_updated_at_administradores
+            BEFORE UPDATE ON administradores
+            FOR EACH ROW
+            EXECUTE FUNCTION actualizar_updated_at();
+      `);
+
+      console.log('✅ Tabla de administradores verificada/creada');
+    } catch (error) {
+      console.error('❌ Error creando tabla de administradores:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Busca un administrador por email
    */
   static async getAdministradorByEmail(email: string): Promise<AdministradorDB | null> {
-    const query = 'SELECT * FROM administradores WHERE email = $1 AND activo = true';
-    const result = await pool.query(query, [email.toLowerCase()]);
-    
-    if (result.rows.length === 0) {
-      return null;
+    try {
+      const query = 'SELECT * FROM administradores WHERE email = $1 AND activo = true';
+      const result = await pool.query(query, [email.toLowerCase()]);
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+      
+      return result.rows[0];
+    } catch (error: any) {
+      // Si la tabla no existe, intentar crearla
+      if (error?.code === '42P01' || error?.message?.includes('does not exist')) {
+        console.log('⚠️ Tabla administradores no existe, creándola...');
+        try {
+          await this.createAdminTableIfNotExists();
+          // Reintentar la consulta
+          const retryResult = await pool.query(query, [email.toLowerCase()]);
+          if (retryResult.rows.length === 0) {
+            return null;
+          }
+          return retryResult.rows[0];
+        } catch (createError) {
+          console.error('❌ Error creando tabla:', createError);
+          throw createError;
+        }
+      }
+      console.error('❌ Error buscando administrador:', error);
+      throw error; // Re-lanzar para que el método login lo capture
     }
-    
-    return result.rows[0];
   }
 
   /**
@@ -128,6 +225,7 @@ export class AuthService {
       const administrador = await this.getAdministradorByEmail(credentials.email);
       
       if (!administrador) {
+        console.log(`❌ Login fallido: No se encontró administrador con email ${credentials.email}`);
         return {
           success: false,
           error: 'Email o contraseña incorrectos'
@@ -137,6 +235,7 @@ export class AuthService {
       const passwordValid = await this.verifyPassword(credentials.password, administrador.password_hash);
       
       if (!passwordValid) {
+        console.log(`❌ Login fallido: Contraseña incorrecta para ${credentials.email}`);
         return {
           success: false,
           error: 'Email o contraseña incorrectos'
@@ -155,6 +254,7 @@ export class AuthService {
         email: administrador.email
       });
 
+      console.log(`✅ Login exitoso para ${administrador.email}`);
       return {
         success: true,
         token,
@@ -164,11 +264,25 @@ export class AuthService {
           nombre: administrador.nombre || undefined
         }
       };
-    } catch (error) {
-      console.error('Error en login:', error);
+    } catch (error: any) {
+      console.error('❌ Error en login:', error);
+      console.error('Detalles del error:', {
+        message: error?.message,
+        code: error?.code,
+        stack: error?.stack
+      });
+      
+      // Si es un error de conexión a la base de datos, dar un mensaje más específico
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND' || error?.message?.includes('connect')) {
+        return {
+          success: false,
+          error: 'Error de conexión a la base de datos. Verifica la configuración de DATABASE_URL.'
+        };
+      }
+      
       return {
         success: false,
-        error: 'Error al procesar el login'
+        error: `Error al procesar el login: ${error?.message || 'Error desconocido'}`
       };
     }
   }
@@ -221,10 +335,70 @@ export class AuthService {
   }
 
   /**
+   * Crea la tabla de administradores si no existe
+   */
+  static async createAdminTableIfNotExists(): Promise<void> {
+    const client = await pool.connect();
+    try {
+      console.log('🔧 Verificando tabla de administradores...');
+      
+      // Crear tabla
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS administradores (
+          id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+          email VARCHAR(255) UNIQUE NOT NULL,
+          password_hash VARCHAR(255) NOT NULL,
+          nombre VARCHAR(100),
+          activo BOOLEAN DEFAULT true,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          last_login TIMESTAMP
+        );
+      `);
+
+      // Crear índices
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS idx_administradores_email ON administradores(email);
+        CREATE INDEX IF NOT EXISTS idx_administradores_activo ON administradores(activo);
+      `);
+
+      // Verificar si existe la función de trigger
+      await client.query(`
+        CREATE OR REPLACE FUNCTION actualizar_updated_at()
+        RETURNS TRIGGER AS $$
+        BEGIN
+            NEW.updated_at = CURRENT_TIMESTAMP;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+      `);
+
+      // Crear trigger
+      await client.query(`
+        DROP TRIGGER IF EXISTS trigger_actualizar_updated_at_administradores ON administradores;
+        CREATE TRIGGER trigger_actualizar_updated_at_administradores
+            BEFORE UPDATE ON administradores
+            FOR EACH ROW
+            EXECUTE FUNCTION actualizar_updated_at();
+      `);
+
+      console.log('✅ Tabla de administradores verificada/creada');
+    } catch (error) {
+      console.error('❌ Error creando tabla de administradores:', error);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Inicializa el administrador por defecto si no existe
    */
   static async initializeDefaultAdmin(): Promise<void> {
     try {
+      // Primero crear la tabla si no existe
+      await this.createAdminTableIfNotExists();
+      
       const defaultEmail = 'AdminEva2026@gmail.com';
       const defaultPassword = 'Admin2026Eva';
       
@@ -246,8 +420,13 @@ export class AuthService {
       } else {
         console.log('✅ Administrador por defecto ya existe');
       }
-    } catch (error) {
-      console.error('Error inicializando administrador por defecto:', error);
+    } catch (error: any) {
+      console.error('❌ Error inicializando administrador por defecto:', error);
+      console.error('Detalles:', {
+        message: error?.message,
+        code: error?.code,
+        stack: error?.stack
+      });
     }
   }
 
