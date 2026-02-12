@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import bcrypt from 'bcrypt';
-import jwt, { SignOptions } from 'jsonwebtoken';
+import jwt from 'jsonwebtoken';
 import pg from 'pg';
 const { Pool } = pg;
 
@@ -100,11 +100,12 @@ export class AuthService {
       type: 'admin'
     };
     
-    const options: SignOptions = {
-      expiresIn: JWT_EXPIRES_IN
-    };
+    // Convertir expiresIn a string explícitamente para evitar error de tipo
+    const expiresInValue: string = String(JWT_EXPIRES_IN);
     
-    return jwt.sign(payload, JWT_SECRET, options);
+    return jwt.sign(payload, JWT_SECRET, {
+      expiresIn: expiresInValue
+    } as any);
   }
 
   /**
