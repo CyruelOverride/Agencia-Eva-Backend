@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: agencia-gestion-backend
+    env: node
+    # IMPORTANTE: Si el backend está en una subcarpeta del repo, 
+    # descomenta y ajusta la siguiente línea:
+    # rootDir: Agencia-Gestion-Backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: JWT_EXPIRES_IN
+        value: 24h
+      - key: PORT
+        value: 10000
+
